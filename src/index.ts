@@ -1,7 +1,9 @@
-import * as puppeteer from 'puppeteer';
+import { Builder, By, until } from 'selenium-webdriver';
+import * as chrome from 'selenium-webdriver/chrome';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
+
 dotenv.config();
 
 async function run() {
@@ -24,23 +26,25 @@ async function run() {
       logStream.write(`${new Date().toISOString()} - ${message}\n`);
     };
 
-    // Launch the browser in the new headless mode
+    // Launch Selenium browser (Chrome) in headless mode with custom options
     log("Launching browser...");
-    const browser = await puppeteer.launch({
-      headless: 'new',
-      args: ['--no-sandbox']
-    });
-
-    // Create a new page and set the viewport
-    log("Creating new page and setting viewport to 1920x1080");
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
+    const chromeOptions = new chrome.Options();
+    chromeOptions.addArguments("--headless=new", "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--window-size=1920,1080");
+    const driver = await new Builder()
+      .forBrowser('chrome')
+      .setChromeOptions(chromeOptions)
+      .build();
 
     // Navigate to the login page
     log("Navigating to login page: https://online.spor.istanbul/uyegiris");
-    await page.goto('https://online.spor.istanbul/uyegiris', { waitUntil: 'networkidle2' });
+    await driver.get('https://online.spor.istanbul/uyegiris');
+    // Wait for the login button to appear to ensure the page has loaded
+    await driver.wait(until.elementLocated(By.css('input[name="btnGirisYap"]')), 10000);
+
+    // Take screenshot of login page
     log("Taking screenshot of login page");
-    await page.screenshot({ path: path.join(screenshotsDir, '1-login_page.png'), fullPage: true });
+    let screenshot = await driver.takeScreenshot();
+    fs.writeFileSync(path.join(screenshotsDir, '1-login_page.png'), screenshot, 'base64');
 
     // Fill in the login form.
     log("Filling in login credentials");
@@ -49,49 +53,52 @@ async function run() {
     if (!tcno || !password) {
       throw new Error("TCNO or PASSWORD is not defined in .env file!");
     }
-    await page.type('input[name="txtTCPasaport"]', tcno, { delay: 100 });
-    await page.type('input[name="txtSifre"]', password, { delay: 100 });
+
+    await driver.findElement(By.css('input[name="txtTCPasaport"]')).sendKeys(tcno);
+    await driver.findElement(By.css('input[name="txtSifre"]')).sendKeys(password);
 
     // Click the submit button and wait for navigation
     log("Clicking login button");
-    await Promise.all([
-      page.click('input[name="btnGirisYap"]'),
-      page.waitForNavigation({ waitUntil: 'networkidle2' })
-    ]);
+    await driver.findElement(By.css('input[name="btnGirisYap"]')).click();
+    
+    // Wait until the URL changes from the login page
+    await driver.wait(async () => {
+      const url = await driver.getCurrentUrl();
+      return !url.includes('uyegiris');
+    }, 10000);
 
-    // Save a screenshot after login
+    // Take screenshot after login
     log("Taking screenshot after login");
-    await page.screenshot({ path: path.join(screenshotsDir, '2-after_login.png'), fullPage: true });
+    screenshot = await driver.takeScreenshot();
+    fs.writeFileSync(path.join(screenshotsDir, '2-after_login.png'), screenshot, 'base64');
 
-    // Navigate to the second page and take another screenshot
+    // Navigate to the second page
     log("Navigating to second page: https://online.spor.istanbul/uyespor");
-    await page.goto('https://online.spor.istanbul/uyespor', { waitUntil: 'networkidle2' });
+    await driver.get('https://online.spor.istanbul/uyespor');
+    // Wait for the page to load; here we simply wait for the body element
+    await driver.wait(until.elementLocated(By.css('body')), 10000);
+
+    // Take screenshot of uyespor page
     log("Taking screenshot of uyespor page");
-    await page.screenshot({ path: path.join(screenshotsDir, '3-uyespor_page.png'), fullPage: true });
+    screenshot = await driver.takeScreenshot();
+    fs.writeFileSync(path.join(screenshotsDir, '3-uyespor_page.png'), screenshot, 'base64');
 
-    log("Clicking on session selection button");
-    await page.evaluate(() => {
-      //@ts-ignore
-      __doPostBack('ctl00$pageContent$rptListe$ctl00$lbtnSeansSecim','');
-    });
+    // Click on session selection button using executeScript to trigger __doPostBack
+    log("Redirecting to session selection page");
+    await driver.executeScript("__doPostBack('ctl00$pageContent$rptListe$ctl00$lbtnSeansSecim','');");
+    
+    // Wait for navigation to session selection page
+    await driver.wait(until.urlContains('uyeseanssecim'), 10000);
+    // Additional sleep to ensure complete loading
+    await driver.sleep(2000);
 
-    log("Waiting for navigation to session selection page");
-    await page.waitForNavigation({ waitUntil: 'networkidle2' });
+    // Take screenshot of session selection page
     log("Taking screenshot of session selection page");
-    await page.screenshot({ path: path.join(screenshotsDir, '4-session_selection_page.png'), fullPage: true });
+    screenshot = await driver.takeScreenshot();
+    fs.writeFileSync(path.join(screenshotsDir, '4-session_selection_page.png'), screenshot, 'base64');
 
-    // Once the final page is loaded (the one with appointment listings),
-    // find all appointment entries (divs with the "well" class), and for those with
-    // a non-zero "Kalan Kontenjan", log their details to the console.
-    const availableAppointments = await page.evaluate(() => {
-      interface Appointment {
-        sessionLevel: string;
-        salonName: string;
-        time: string;
-        gender: string;
-        capacity: number;
-        day: string;
-      }
+    // Evaluate and extract available appointments
+    const availableAppointments = await driver.executeScript(function() {
       const appointmentNodes = Array.from(document.querySelectorAll('div.well'));
       const appointments = appointmentNodes.map(appointment => {
         const capacityElem = appointment.querySelector('span.label-default[title="Kalan Kontenjan"]');
@@ -119,11 +126,11 @@ async function run() {
           };
         }
         return null;
-      }).filter(appointment => appointment !== null) as Appointment[];
-
+      }).filter(appointment => appointment !== null);
       return appointments;
-    });
+    }) as { sessionLevel: string, salonName: string, time: string, gender: string, capacity: number, day: string }[];
 
+    // Format the appointments list for logging
     const appointmentsList = availableAppointments.map((app: { sessionLevel: string, salonName: string, time: string, gender: string, capacity: number, day: string }) => {
       return `Day: ${app.day}, Session Level: ${app.sessionLevel}, Salon: ${app.salonName}, Time: ${app.time}, Gender: ${app.gender}, Capacity: ${app.capacity}`;
     }).join('\n');
@@ -136,7 +143,7 @@ async function run() {
     }
 
     log("Closing browser");
-    await browser.close();
+    await driver.quit();
     logStream.end();
   } catch (error) {
     console.error('Error during automation:', error);
