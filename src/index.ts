@@ -1,10 +1,33 @@
+// Add nodemailer import and sendEmail function after dotenv.config();
 import { Builder, By, until } from 'selenium-webdriver';
 import * as chrome from 'selenium-webdriver/chrome';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
+import * as nodemailer from 'nodemailer';  // updated import
 
 dotenv.config();
+
+async function sendEmail(subject: string, text: string, attachments: { filename: string, path: string }[]): Promise<void> {
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT) : 587,
+    secure: false,
+    auth: {
+      user: process.env.MAIL_USER,
+      pass: process.env.MAIL_PASSWORD
+    }
+  });
+  await transporter.sendMail({
+    from: process.env.MAIL_USER,
+    to: process.env.MAIL_RECIPIENT,
+    subject,
+    text,
+    attachments
+  });
+}
+
+// ... existing code ...
 
 async function run() {
   try {
@@ -135,11 +158,35 @@ async function run() {
       return `Day: ${app.day}, Session Level: ${app.sessionLevel}, Salon: ${app.salonName}, Time: ${app.time}, Gender: ${app.gender}, Capacity: ${app.capacity}`;
     }).join('\n');
 
+    // Read log file content as text
+    const logContent = fs.readFileSync(logFile, 'utf-8');
+    // Combine appointments and log content in email body
+    const emailBody = appointmentsList + "\n\nLogs:\n" + logContent;
+
+    // Create attachments array with screenshots only (no log file attachment)
+    const attachments: { filename: string, path: string }[] = [];
+    const screenshotFiles = fs.readdirSync(screenshotsDir);
+    for (const file of screenshotFiles) {
+      attachments.push({ filename: file, path: path.join(screenshotsDir, file) });
+    }
+
     if (availableAppointments.length) {
       log("Appointments with available quota found:");
       log(appointmentsList);
+      try {
+        await sendEmail("Appointment Notification: Appointments available", emailBody, attachments);
+        log("Email sent successfully.");
+      } catch (emailError) {
+        log("Failed to send email: " + emailError);
+      }
     } else {
       log("No appointments with available quota were found.");
+      try {
+        await sendEmail("Appointment Notification: No appointments available", "No appointments available as of " + new Date().toISOString() + "\n\nLogs:\n" + logContent, attachments);
+        log("Email sent successfully.");
+      } catch (emailError) {
+        log("Failed to send email: " + emailError);
+      }
     }
 
     log("Closing browser");
